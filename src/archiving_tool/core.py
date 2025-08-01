@@ -29,6 +29,19 @@ class ArchivingTool:
         self.source_dir = Path(source_dir).resolve()
         self.destination_dir = Path(destination_dir).resolve()
         
+        # Detect if source is a network path for optimized handling
+        self.is_network_source = self._is_network_path(self.source_dir)
+        if self.is_network_source:
+            print(f"Network source detected: {self.source_dir}")
+            print("Enhanced network error handling and retry logic enabled")
+            
+            # Check if it's specifically an SMB mount for additional features
+            try:
+                if self._is_smb_mount(self.source_dir):
+                    print("SMB/CIFS mount detected - automatic reconnection available")
+            except:
+                pass  # Don't fail initialization if SMB detection fails
+        
         if manifest_file:
             self.manifest_file = Path(manifest_file).resolve()
         else:
@@ -48,9 +61,13 @@ class ArchivingTool:
                 '.localized', '.VolumeIcon.icns'
             })
         
-        # Retry configuration
-        self.max_retries = 3
-        self.retry_delay = 2.0  # seconds
+        # Retry configuration - enhanced for network reliability
+        if self.is_network_source:
+            self.max_retries = 8  # More retries for network sources
+            self.retry_delay = 5.0  # Longer delays for network recovery
+        else:
+            self.max_retries = 5  # Standard for local sources
+            self.retry_delay = 3.0  # Standard delay
         
         # Platform-specific optimizations
         self.is_macos = platform.system() == 'Darwin'
@@ -105,6 +122,296 @@ class ArchivingTool:
             test_file.unlink()
             return True
         except (OSError, IOError, PermissionError):
+            return False
+            
+    def _is_source_accessible(self) -> bool:
+        """Check if the source directory is accessible (especially important for network paths)."""
+        try:
+            # Try to access the source directory
+            if not self.source_dir.exists():
+                return False
+            
+            # Try to list the directory to ensure network connectivity
+            list(self.source_dir.iterdir())
+            return True
+        except (OSError, IOError, PermissionError):
+            return False
+            
+    def _is_network_error(self, error: Exception) -> bool:
+        """Check if an error is network-related (SMB, NFS, etc.)."""
+        error_msg = str(error).lower()
+        network_indicators = [
+            'socket is not connected',  # SMB disconnection
+            'connection refused',
+            'connection reset',
+            'network is unreachable',
+            'host is unreachable',
+            'timeout',
+            'connection timed out',
+            'connection lost',
+            'no route to host',
+            'connection aborted',
+            'broken pipe',
+            'smb',
+            'cifs',
+            'nfs'
+        ]
+        
+        # Check error message
+        for indicator in network_indicators:
+            if indicator in error_msg:
+                return True
+                
+        # Check errno values for network-related errors
+        if hasattr(error, 'errno'):
+            network_errnos = {
+                57,   # ENOTCONN (Socket is not connected)
+                61,   # ECONNREFUSED (Connection refused)
+                64,   # EHOSTDOWN (Host is down)
+                65,   # EHOSTUNREACH (No route to host)
+                104,  # ECONNRESET (Connection reset by peer)
+                110,  # ETIMEDOUT (Connection timed out)
+                111,  # ECONNREFUSED (Connection refused)
+                113,  # EHOSTUNREACH (No route to host)
+            }
+            if error.errno in network_errnos:
+                return True
+                
+        return False
+        
+    def _show_network_troubleshooting_tips(self) -> None:
+        """Display helpful troubleshooting tips for network connectivity issues."""
+        print("\n" + "=" * 60)
+        print("NETWORK CONNECTIVITY TROUBLESHOOTING TIPS")
+        print("=" * 60)
+        print("If you're experiencing network connectivity issues:")
+        print()
+        print("1. SMB/CIFS Shares:")
+        print("   - The tool will automatically attempt to remount disconnected SMB shares")
+        print("   - Check if the share is still mounted: mount | grep cifs")
+        print("   - Manual remount: sudo umount /path && sudo mount -t cifs //server/share /path")
+        print("   - Verify network connectivity to the server")
+        print()
+        print("2. NFS Shares:")
+        print("   - Check mount status: mount | grep nfs")
+        print("   - Try remounting: sudo umount /path && sudo mount -t nfs server:/path /path")
+        print()
+        print("3. General Network Issues:")
+        print("   - Check network connection: ping <server-ip>")
+        print("   - Verify DNS resolution: nslookup <server-name>")
+        print("   - Check firewall settings")
+        print()
+        print("4. Resume Options:")
+        print("   - Use 'resume' command to continue from where it stopped")
+        print("   - The tool automatically saves progress and can resume interrupted operations")
+        print("=" * 60)
+        print()
+        
+    def _is_network_path(self, path: Path) -> bool:
+        """Check if a path is likely a network path (SMB, NFS, etc.)."""
+        path_str = str(path).lower()
+        
+        # Common network path indicators
+        network_indicators = [
+            '///',           # SMB paths on Linux
+            '//',            # UNC paths  
+            'smb://',        # SMB protocol
+            'nfs://',        # NFS protocol
+            'ftp://',        # FTP protocol
+            'sftp://',       # SFTP protocol
+        ]
+        
+        for indicator in network_indicators:
+            if indicator in path_str:
+                return True
+                
+        # Check if path starts with /mnt/ (common mount point)
+        if path_str.startswith('/mnt/'):
+            return True
+            
+        # Check if path is in common network mount locations
+        network_mount_prefixes = ['/media/', '/run/media/', '/volumes/']
+        for prefix in network_mount_prefixes:
+            if path_str.startswith(prefix):
+                return True
+                
+        return False
+        
+    def _get_mount_info(self, path: Path) -> Optional[Dict]:
+        """Get mount information for a given path."""
+        try:
+            import subprocess
+            # Use findmnt to get mount information
+            result = subprocess.run(
+                ['findmnt', '-T', str(path), '-o', 'SOURCE,FSTYPE,OPTIONS', '-n'],
+                capture_output=True, text=True, timeout=10
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                parts = result.stdout.strip().split()
+                if len(parts) >= 2:
+                    return {
+                        'source': parts[0],
+                        'fstype': parts[1],
+                        'options': parts[2] if len(parts) > 2 else '',
+                        'mountpoint': str(path)
+                    }
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+        return None
+        
+    def _is_smb_mount(self, path: Path) -> bool:
+        """Check if the path is mounted as SMB/CIFS."""
+        mount_info = self._get_mount_info(path)
+        if mount_info:
+            fstype = mount_info.get('fstype', '').lower()
+            return fstype in ['cifs', 'smb', 'smbfs']
+        return False
+        
+    def _get_smb_mount_command(self, path: Path) -> Optional[str]:
+        """Generate the mount command to remount an SMB share."""
+        mount_info = self._get_mount_info(path)
+        if not mount_info:
+            return None
+            
+        fstype = mount_info.get('fstype', '').lower()
+        if fstype not in ['cifs', 'smb', 'smbfs']:
+            return None
+            
+        source = mount_info.get('source', '')
+        options = mount_info.get('options', '')
+        
+        # Clean up options - remove some that might cause issues on remount
+        if options:
+            # Remove options that might cause problems on remount
+            option_list = [opt for opt in options.split(',') 
+                          if not opt.startswith(('_netdev', 'user'))]
+            clean_options = ','.join(option_list) if option_list else ''
+        else:
+            clean_options = ''
+            
+        # Construct mount command
+        if clean_options:
+            mount_cmd = f"sudo mount -t cifs '{source}' '{path}' -o {clean_options}"
+        else:
+            mount_cmd = f"sudo mount -t cifs '{source}' '{path}'"
+            
+        return mount_cmd
+        
+    def _attempt_smb_reconnection(self, path: Path) -> bool:
+        """Attempt to reconnect an SMB share by unmounting and remounting."""
+        try:
+            import subprocess
+            
+            print(f"Attempting to reconnect SMB share at {path}...")
+            
+            # First, try to get mount information before unmounting
+            mount_cmd = self._get_smb_mount_command(path)
+            if not mount_cmd:
+                print("Could not determine mount command for SMB share")
+                return False
+            
+            # Step 1: Unmount (with force if needed)
+            print("Unmounting SMB share...")
+            try:
+                # Try graceful unmount first
+                result = subprocess.run(
+                    ['sudo', 'umount', str(path)],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode != 0:
+                    # If graceful unmount fails, try force unmount
+                    print("Graceful unmount failed, trying force unmount...")
+                    result = subprocess.run(
+                        ['sudo', 'umount', '-f', str(path)],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    if result.returncode != 0:
+                        # If even force unmount fails, try lazy unmount
+                        print("Force unmount failed, trying lazy unmount...")
+                        subprocess.run(
+                            ['sudo', 'umount', '-l', str(path)],
+                            capture_output=True, text=True, timeout=30
+                        )
+            except subprocess.TimeoutExpired:
+                print("Unmount operation timed out")
+                return False
+            
+            # Step 2: Wait a moment for cleanup
+            time.sleep(2)
+            
+            # Step 3: Remount
+            print(f"Remounting SMB share...")
+            print(f"Using command: {mount_cmd}")
+            
+            # Execute the mount command
+            result = subprocess.run(
+                mount_cmd, shell=True, capture_output=True, text=True, timeout=60
+            )
+            
+            if result.returncode == 0:
+                print("SMB share remounted successfully!")
+                # Verify the mount worked
+                time.sleep(1)
+                if self._is_source_accessible():
+                    return True
+                else:
+                    print("Mount appeared successful but source is still not accessible")
+                    return False
+            else:
+                error_msg = result.stderr.strip()
+                print(f"Failed to remount SMB share: {error_msg}")
+                
+                # If sudo failed, suggest manual intervention
+                if "sudo" in error_msg or "permission" in error_msg.lower():
+                    print("\nNote: Automatic remounting requires sudo privileges.")
+                    print("You may need to manually remount the SMB share:")
+                    print(f"  {mount_cmd}")
+                    print("Or ensure the share is configured in /etc/fstab for automatic mounting.")
+                    
+                return False
+                
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            print(f"Error during SMB reconnection: {e}")
+            return False
+        except Exception as e:
+            print(f"Unexpected error during SMB reconnection: {e}")
+            return False
+            
+    def _attempt_network_reconnection(self, path: Path) -> bool:
+        """Attempt to actively reconnect a network mount."""
+        if self._is_smb_mount(path):
+            return self._attempt_smb_reconnection(path)
+        else:
+            # For other network filesystems, we can add support later
+            print(f"Active reconnection not yet supported for this filesystem type")
+            return False
+            
+    def reconnect_network_source(self) -> bool:
+        """Manually attempt to reconnect the network source.
+        
+        This method can be called directly by users when they want to 
+        manually trigger a reconnection attempt.
+        
+        Returns:
+            True if reconnection succeeded, False otherwise
+        """
+        if not self.is_network_source:
+            print("Source is not detected as a network path")
+            return False
+            
+        print(f"Attempting manual reconnection of network source: {self.source_dir}")
+        
+        if self._attempt_network_reconnection(self.source_dir):
+            if self._is_source_accessible():
+                print("Manual reconnection successful!")
+                return True
+            else:
+                print("Reconnection appeared successful but source is still not accessible")
+                return False
+        else:
+            print("Manual reconnection failed")
+            self._show_network_troubleshooting_tips()
             return False
             
     def _check_macos_drive_mounted(self) -> bool:
@@ -213,6 +520,70 @@ class ArchivingTool:
                 
         print(f"Drive did not reconnect within {max_wait_time}s timeout")
         return False
+        
+    def _wait_for_network_reconnection(self, max_wait_time: int = 120) -> bool:
+        """Wait for network source to reconnect with intelligent retry intervals.
+        
+        Network connections (like SMB) often need longer to reconnect than local drives.
+        This method also attempts active reconnection for supported network filesystems.
+        
+        Args:
+            max_wait_time: Maximum time to wait in seconds (default 2 minutes for networks)
+            
+        Returns:
+            True if source becomes accessible, False if timeout reached
+        """
+        wait_intervals = [5, 10, 15, 30, 60]  # Longer intervals for network recovery
+        total_waited = 0
+        attempted_active_reconnection = False
+        
+        print(f"Network source appears disconnected. Waiting for reconnection...")
+        
+        for interval in wait_intervals:
+            if total_waited >= max_wait_time:
+                break
+            
+            # Attempt active reconnection on the second iteration (after first wait)
+            if not attempted_active_reconnection and total_waited > 0:
+                attempted_active_reconnection = True
+                print("Attempting active network reconnection...")
+                if self._attempt_network_reconnection(self.source_dir):
+                    # Check if reconnection was successful
+                    if self._is_source_accessible():
+                        print("Active reconnection successful!")
+                        return True
+                    else:
+                        print("Active reconnection appeared to succeed but source still not accessible")
+                else:
+                    print("Active reconnection failed, continuing with passive waiting...")
+            
+            print(f"Waiting {interval}s for network reconnection...")
+            time.sleep(interval)
+            total_waited += interval
+            
+            if self._is_source_accessible():
+                print("Network source reconnected successfully!")
+                return True
+                
+        # Final attempt at active reconnection if not tried yet
+        if not attempted_active_reconnection:
+            print("Final attempt at active network reconnection...")
+            if self._attempt_network_reconnection(self.source_dir):
+                if self._is_source_accessible():
+                    print("Final active reconnection successful!")
+                    return True
+                    
+        # Final wait with remaining time
+        remaining_time = max_wait_time - total_waited
+        if remaining_time > 0:
+            print(f"Final wait of {remaining_time}s for network reconnection...")
+            time.sleep(remaining_time)
+            if self._is_source_accessible():
+                print("Network source reconnected successfully!")
+                return True
+                
+        print(f"Network source did not reconnect within {max_wait_time}s timeout")
+        return False
             
     def _copy_with_macos_optimization(self, source_path: Path, dest_path: Path) -> None:
         """Use macOS-optimized copy operations."""
@@ -229,12 +600,15 @@ class ArchivingTool:
             shutil.copy2(source_path, dest_path)
             
     def _copy_file_with_retry(self, source_path: Path, dest_path: Path, file_info: Dict) -> bool:
-        """Copy a single file with retry logic for drive issues.
+        """Copy a single file with retry logic for drive and network issues.
         
         The retry mechanism works by using a for loop that repeats the entire copy operation
         up to max_retries + 1 times. When an exception occurs (copy failure or verification
         failure), the exception handler performs cleanup and uses 'continue' to restart the
         loop from the beginning, which triggers a new copy attempt.
+        
+        Enhanced for network sources (SMB, NFS, etc.) with longer timeouts and 
+        network-specific error detection.
         
         Performance optimization: Drive accessibility is only checked AFTER a copy failure,
         not before every copy attempt, to avoid unnecessary overhead when copying many files.
@@ -281,18 +655,24 @@ class ArchivingTool:
                 return True
                 
             except (OSError, IOError, PermissionError) as e:
-                # Copy failed - now check if it's a drive issue
+                # Check if this is a network-related error
+                is_network_error = self._is_network_error(e)
                 if attempt < self.max_retries:
-                    # Check if drive is accessible only after a failure
-                    if not self._is_drive_accessible():
-                        print(f"Drive not accessible after copy failure, waiting for reconnection... (attempt {attempt + 1}/{self.max_retries + 1})")
-                        # Wait longer for drive reconnection
-                        if not self._wait_for_drive_reconnection():
-                            # If drive still not accessible after waiting, continue with retries
-                            print(f"Drive still not accessible, continuing retry... (attempt {attempt + 1}/{self.max_retries + 1})")
+                    if is_network_error:
+                        print(f"Network error detected ({e}), waiting for network reconnection... (attempt {attempt + 1}/{self.max_retries + 1})")
+                        # Wait longer for network reconnection
+                        if not self._wait_for_network_reconnection():
+                            print(f"Network still not accessible, continuing retry... (attempt {attempt + 1}/{self.max_retries + 1})")
                     else:
-                        print(f"Copy failed ({e}), retrying in {self.retry_delay}s... (attempt {attempt + 1}/{self.max_retries + 1})")
-                        time.sleep(self.retry_delay)
+                        # Check if destination drive is accessible only after a non-network failure
+                        if not self._is_drive_accessible():
+                            print(f"Destination drive not accessible after copy failure, waiting for reconnection... (attempt {attempt + 1}/{self.max_retries + 1})")
+                            # Wait for drive reconnection
+                            if not self._wait_for_drive_reconnection():
+                                print(f"Drive still not accessible, continuing retry... (attempt {attempt + 1}/{self.max_retries + 1})")
+                        else:
+                            print(f"Copy failed ({e}), retrying in {self.retry_delay}s... (attempt {attempt + 1}/{self.max_retries + 1})")
+                            time.sleep(self.retry_delay)
                     
                     # Clean up partial file if it exists
                     if dest_path.exists():
@@ -302,17 +682,26 @@ class ArchivingTool:
                             pass
                     continue
                 else:
-                    print(f"Error: Copy failed after {self.max_retries + 1} attempts for {source_path}: {e}")
+                    error_type = "Network error" if is_network_error else "Copy error"
+                    print(f"Error: {error_type} after {self.max_retries + 1} attempts for {source_path}: {e}")
                     return False
             except RuntimeError as e:
-                # Hash calculation error - likely indicates drive issue
+                # Hash calculation error - could indicate network or drive issue
                 if attempt < self.max_retries:
                     print(f"Verification failed ({e}), retrying... (attempt {attempt + 1}/{self.max_retries + 1})")
-                    # Check drive accessibility only after verification failure
-                    if not self._is_drive_accessible():
-                        print("Drive accessibility issue detected, waiting for reconnection...")
+                    
+                    # Check both source and destination accessibility
+                    source_accessible = self._is_source_accessible()
+                    dest_accessible = self._is_drive_accessible()
+                    
+                    if not source_accessible:
+                        print("Source accessibility issue detected, waiting for network reconnection...")
+                        if not self._wait_for_network_reconnection():
+                            print("Source still not accessible, continuing retry...")
+                    elif not dest_accessible:
+                        print("Destination accessibility issue detected, waiting for drive reconnection...")
                         if not self._wait_for_drive_reconnection():
-                            print("Drive still not accessible, continuing retry...")
+                            print("Destination still not accessible, continuing retry...")
                     else:
                         time.sleep(self.retry_delay)
                     
@@ -558,6 +947,17 @@ class ArchivingTool:
             completed_files = []
             failed_files = []
             
+            # Initial source accessibility check (important for network sources)
+            if not self._is_source_accessible():
+                print("Error: Source directory is not accessible")
+                if self.is_network_source:
+                    print("This appears to be a network source (SMB, NFS, etc.)")
+                    print("Network connectivity issue detected!")
+                    self._show_network_troubleshooting_tips()
+                else:
+                    print("Please check that the source directory exists and is accessible")
+                return False
+            
             # Initial drive accessibility check (only once at start)
             if not self._is_drive_accessible():
                 print("Error: Destination drive is not accessible")
@@ -600,6 +1000,11 @@ class ArchivingTool:
                     print(f"Failed to copy: {len(failed_files)} files")
                     print(f"Failed files: {failed_files}")
                     print(f"Run the copy command again to resume from where it left off.")
+                    
+                    # Show network troubleshooting tips if this appears to be a network source
+                    if self.is_network_source:
+                        self._show_network_troubleshooting_tips()
+                    
                     return False
                     
             # Clear progress state on successful completion
@@ -727,6 +1132,17 @@ class ArchivingTool:
             completed_files = []
             failed_files = []
             
+            # Initial source accessibility check (important for network sources)
+            if not self._is_source_accessible():
+                print("Error: Source directory is not accessible")
+                if self.is_network_source:
+                    print("This appears to be a network source (SMB, NFS, etc.)")
+                    print("Network connectivity issue detected!")
+                    self._show_network_troubleshooting_tips()
+                else:
+                    print("Please check that the source directory exists and is accessible")
+                return False
+            
             # Calculate total size for progress tracking
             total_copy_size = sum(manifest_files[rel_path]['size'] for rel_path in files_to_copy)
             progress_bar = self._create_progress_bar(
@@ -752,6 +1168,11 @@ class ArchivingTool:
                     print(f"Failed to copy: {len(failed_files)} files")
                     print(f"Failed files: {failed_files}")
                     print(f"Run the update command again to resume from where it left off.")
+                    
+                    # Show network troubleshooting tips if this appears to be a network source
+                    if self.is_network_source:
+                        self._show_network_troubleshooting_tips()
+                    
                     return False
                     
         print("\nUpdate operation completed successfully!")
