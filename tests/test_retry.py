@@ -48,18 +48,27 @@ class TestRetryFunctionality(unittest.TestCase):
         tool_bad = ArchivingTool(str(self.source_dir), "/nonexistent/path")
         self.assertFalse(tool_bad._is_drive_accessible())
         
+    @patch('archiving_tool.core.ArchivingTool._is_source_accessible')
     @patch('archiving_tool.core.ArchivingTool._is_drive_accessible')
-    def test_copy_with_temporary_drive_disconnect(self, mock_accessible):
+    def test_copy_with_temporary_drive_disconnect(self, mock_drive_accessible, mock_source_accessible):
         """Test copy operation with temporary drive disconnection."""
+        # Source is always accessible for this test
+        mock_source_accessible.return_value = True
+        
         # Create a counter to control behavior
         call_count = 0
         def drive_accessible_behavior():
             nonlocal call_count
             call_count += 1
-            # First few calls fail, then succeed
-            return call_count > 2
+            # First call (initial check) succeeds, then a few fail, then succeed again
+            if call_count == 1:
+                return True  # Initial check passes
+            elif call_count <= 4:
+                return False  # Simulate disconnect during copy
+            else:
+                return True  # Recover
         
-        mock_accessible.side_effect = drive_accessible_behavior
+        mock_drive_accessible.side_effect = drive_accessible_behavior
         
         # Create manifest first
         self.tool.init()
@@ -72,11 +81,13 @@ class TestRetryFunctionality(unittest.TestCase):
         self.assertTrue((self.dest_dir / "test1.txt").exists())
         self.assertTrue((self.dest_dir / "test2.txt").exists())
         
+    @patch('archiving_tool.core.ArchivingTool._is_source_accessible')
     @patch('archiving_tool.core.ArchivingTool._is_drive_accessible')
-    def test_copy_with_persistent_drive_disconnect(self, mock_accessible):
+    def test_copy_with_persistent_drive_disconnect(self, mock_drive_accessible, mock_source_accessible):
         """Test copy operation with persistent drive disconnection."""
-        # Drive stays disconnected for all retry attempts
-        mock_accessible.return_value = False
+        # Source is accessible but drive stays disconnected for all retry attempts
+        mock_source_accessible.return_value = True
+        mock_drive_accessible.return_value = False
         
         # Create manifest first
         self.tool.init()
@@ -93,6 +104,9 @@ class TestRetryFunctionality(unittest.TestCase):
     @patch('shutil.copy2')
     def test_copy_with_temporary_io_error(self, mock_copy):
         """Test copy operation with temporary I/O errors."""
+        # Store reference to original copy function
+        original_copy = shutil.copy2.__wrapped__ if hasattr(shutil.copy2, '__wrapped__') else shutil.copy2
+        
         # Create a counter to control behavior
         call_count = 0
         def copy_behavior(src, dst):
@@ -105,7 +119,9 @@ class TestRetryFunctionality(unittest.TestCase):
                 # Actually create the file when copy succeeds
                 dst_path = Path(dst)
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)  # Call real copy
+                # Copy the content manually to avoid recursion
+                with open(src, 'rb') as src_file, open(dst, 'wb') as dst_file:
+                    dst_file.write(src_file.read())
                 return None
         
         mock_copy.side_effect = copy_behavior
@@ -198,6 +214,12 @@ class TestRetryFunctionality(unittest.TestCase):
             nonlocal first_run
             if first_run and "test1.txt" in str(src):
                 raise OSError("Drive disconnected")
+            else:
+                # Create the file when copy succeeds to avoid verification errors
+                dst_path = Path(dst)
+                dst_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(src, 'rb') as src_file, open(dst, 'wb') as dst_file:
+                    dst_file.write(src_file.read())
             return None
             
         mock_copy.side_effect = copy_side_effect
@@ -226,8 +248,14 @@ class TestRetryFunctionality(unittest.TestCase):
         
     def test_retry_configuration(self):
         """Test that retry configuration is properly set."""
-        self.assertEqual(self.tool.max_retries, 3)
-        self.assertEqual(self.tool.retry_delay, 2.0)
+        # Local sources get 5 retries, 3.0s delay
+        self.assertEqual(self.tool.max_retries, 5)
+        self.assertEqual(self.tool.retry_delay, 3.0)
+        
+        # Test network source configuration
+        network_tool = ArchivingTool("/mnt/network_share", str(self.dest_dir))
+        self.assertEqual(network_tool.max_retries, 8)  # Network sources get more retries
+        self.assertEqual(network_tool.retry_delay, 5.0)  # Network sources get longer delays
         
         # Test custom configuration
         custom_tool = ArchivingTool(str(self.source_dir), str(self.dest_dir))
@@ -327,14 +355,20 @@ class TestRetryIntegration(unittest.TestCase):
         # Create manifest
         self.tool.init()
         
-        # Mock copy to fail on 3rd file
+        # Mock copy to persistently fail on 3rd file (for all retry attempts)
         original_copy = shutil.copy2
         call_count = 0
+        failed_file = None
         
         def selective_fail_copy(src, dst):
-            nonlocal call_count
+            nonlocal call_count, failed_file
             call_count += 1
-            if call_count == 3:  # Fail on 3rd file
+            # Determine which file should fail persistently
+            if call_count == 3 and failed_file is None:
+                failed_file = str(src)
+            
+            # Always fail on the designated file
+            if failed_file and str(src) == failed_file:
                 raise OSError("Drive disconnected")
             return original_copy(src, dst)
             

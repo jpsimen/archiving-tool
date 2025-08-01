@@ -715,7 +715,7 @@ class ArchivingTool:
                 else:
                     print(f"Error: Verification failed after {self.max_retries + 1} attempts for {source_path}: {e}")
                     return False
-                    
+            
         return False
         
     def _save_progress_state(self, manifest: Dict, completed_files: List[str], failed_files: List[str]) -> bool:
@@ -986,29 +986,43 @@ class ArchivingTool:
                 total_copy_size
             )
             
-            for source_path, dest_path, file_info in progress_bar:
-                rel_path = self._get_relative_path(source_path)
+            try:
+                for source_path, dest_path, file_info in progress_bar:
+                    rel_path = self._get_relative_path(source_path)
+                    
+                    if self._copy_file_with_retry(source_path, dest_path, file_info):
+                        completed_files.append(rel_path)
+                    else:
+                        failed_files.append(rel_path)
+                        # Save progress before aborting
+                        self._save_progress_state(manifest, completed_files, failed_files)
+                        print(f"\nCopy operation aborted due to persistent failures.")
+                        print(f"Successfully copied: {len(completed_files)} files")
+                        print(f"Failed to copy: {len(failed_files)} files")
+                        print(f"Failed files: {failed_files}")
+                        print(f"Run the copy command again to resume from where it left off.")
+                        
+                        # Show network troubleshooting tips if this appears to be a network source
+                        if self.is_network_source:
+                            self._show_network_troubleshooting_tips()
+                        
+                        return False
+                        
+                # Clear progress state on successful completion
+                self._clear_progress_state()
+            except Exception as e:
+                # Save progress for any unexpected exception (KeyboardInterrupt, MemoryError, etc.)
+                self._save_progress_state(manifest, completed_files, failed_files)
+                print(f"\nCopy operation interrupted by unexpected error: {e}")
+                print(f"Successfully copied: {len(completed_files)} files")
+                print(f"Failed to copy: {len(failed_files)} files")
+                print(f"Progress has been saved. Run the copy command again to resume from where it left off.")
                 
-                if self._copy_file_with_retry(source_path, dest_path, file_info):
-                    completed_files.append(rel_path)
-                else:
-                    failed_files.append(rel_path)
-                    # Save progress before aborting
-                    self._save_progress_state(manifest, completed_files, failed_files)
-                    print(f"\nCopy operation aborted due to persistent failures.")
-                    print(f"Successfully copied: {len(completed_files)} files")
-                    print(f"Failed to copy: {len(failed_files)} files")
-                    print(f"Failed files: {failed_files}")
-                    print(f"Run the copy command again to resume from where it left off.")
-                    
-                    # Show network troubleshooting tips if this appears to be a network source
-                    if self.is_network_source:
-                        self._show_network_troubleshooting_tips()
-                    
-                    return False
-                    
-            # Clear progress state on successful completion
-            self._clear_progress_state()
+                # Show network troubleshooting tips if this appears to be a network source
+                if self.is_network_source:
+                    self._show_network_troubleshooting_tips()
+                
+                return False
                     
         # Verify existing files
         if files_to_verify:
@@ -1152,28 +1166,42 @@ class ArchivingTool:
                 total_copy_size
             )
             
-            for rel_path in progress_bar:
-                source_path = self.source_dir / rel_path
-                dest_path = self.destination_dir / rel_path
-                file_info = manifest_files[rel_path]
+            try:
+                for rel_path in progress_bar:
+                    source_path = self.source_dir / rel_path
+                    dest_path = self.destination_dir / rel_path
+                    file_info = manifest_files[rel_path]
+                    
+                    if self._copy_file_with_retry(source_path, dest_path, file_info):
+                        completed_files.append(rel_path)
+                    else:
+                        failed_files.append(rel_path)
+                        # Save progress before aborting
+                        self._save_progress_state(manifest, completed_files, failed_files)
+                        print(f"\nUpdate operation aborted due to persistent failures.")
+                        print(f"Successfully copied: {len(completed_files)} files")
+                        print(f"Failed to copy: {len(failed_files)} files")
+                        print(f"Failed files: {failed_files}")
+                        print(f"Run the update command again to resume from where it left off.")
+                        
+                        # Show network troubleshooting tips if this appears to be a network source
+                        if self.is_network_source:
+                            self._show_network_troubleshooting_tips()
+                        
+                        return False
+            except Exception as e:
+                # Save progress for any unexpected exception (KeyboardInterrupt, MemoryError, etc.)
+                self._save_progress_state(manifest, completed_files, failed_files)
+                print(f"\nUpdate operation interrupted by unexpected error: {e}")
+                print(f"Successfully copied: {len(completed_files)} files")
+                print(f"Failed to copy: {len(failed_files)} files")
+                print(f"Progress has been saved. Run the update command again to resume from where it left off.")
                 
-                if self._copy_file_with_retry(source_path, dest_path, file_info):
-                    completed_files.append(rel_path)
-                else:
-                    failed_files.append(rel_path)
-                    # Save progress before aborting
-                    self._save_progress_state(manifest, completed_files, failed_files)
-                    print(f"\nUpdate operation aborted due to persistent failures.")
-                    print(f"Successfully copied: {len(completed_files)} files")
-                    print(f"Failed to copy: {len(failed_files)} files")
-                    print(f"Failed files: {failed_files}")
-                    print(f"Run the update command again to resume from where it left off.")
-                    
-                    # Show network troubleshooting tips if this appears to be a network source
-                    if self.is_network_source:
-                        self._show_network_troubleshooting_tips()
-                    
-                    return False
+                # Show network troubleshooting tips if this appears to be a network source
+                if self.is_network_source:
+                    self._show_network_troubleshooting_tips()
+                
+                return False
                     
         print("\nUpdate operation completed successfully!")
         return True

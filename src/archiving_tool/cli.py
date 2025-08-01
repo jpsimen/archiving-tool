@@ -39,6 +39,19 @@ def cli():
     
     This tool helps you safely copy and maintain collections of music, photos,
     videos, and other personal files with integrity verification using checksums.
+    
+    NETWORK SOURCES:
+    Supports SMB/CIFS, NFS and other network sources with enhanced error handling:
+    - Automatic detection of network paths (/mnt/, //server/share, etc.)
+    - Active SMB reconnection when network disconnects
+    - Enhanced retry logic with longer timeouts for network sources
+    - Progress preservation and resume capability after network failures
+    
+    FEATURES:
+    - SHA256 checksums for integrity verification
+    - Progress tracking and resume capability
+    - Intelligent retry logic with exponential backoff
+    - Cross-platform support (Linux, macOS, Windows)
     """
     pass
 
