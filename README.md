@@ -2,6 +2,9 @@
 
 A reliable command-line tool for archiving private data collections (music, photos, videos) with integrity verification using checksums.
 
+## To Do's 
+Handle [Errno 57] Socket is not connected
+
 ## Features
 
 - **Hash-based integrity verification** - Uses SHA256 checksums to ensure data integrity
