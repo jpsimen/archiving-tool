@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -72,6 +73,78 @@ class ArchivingTool:
         # Platform-specific optimizations
         self.is_macos = platform.system() == 'Darwin'
         self.chunk_size = 1024 * 1024 if self.is_macos else 8192  # 1MB chunks for macOS/APFS
+        
+        # Detect destination filesystem type
+        self.dest_filesystem = self._detect_filesystem_type(self.destination_dir)
+        if self.dest_filesystem:
+            print(f"Detected destination filesystem: {self.dest_filesystem}")
+        
+    def _detect_filesystem_type(self, path: Path) -> Optional[str]:
+        """Detect the filesystem type of the given path.
+        
+        Returns:
+            Filesystem type (e.g., 'ext4', 'fat32', 'ntfs', 'apfs') or None if cannot be determined
+        """
+        try:
+            if self.is_macos:
+                result = subprocess.run(
+                    ['diskutil', 'info', str(path)],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    output = result.stdout.lower()
+                    if 'apfs' in output:
+                        return 'apfs'
+                    elif 'fat32' in output or 'msdos' in output:
+                        return 'fat32'
+                    elif 'ntfs' in output:
+                        return 'ntfs'
+                    elif 'hfs' in output:
+                        return 'hfs'
+            else:
+                # Use findmnt on Linux
+                result = subprocess.run(
+                    ['findmnt', '-T', str(path), '-o', 'FSTYPE', '-n'],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    fstype = result.stdout.strip().lower()
+                    # Map common filesystem types
+                    if fstype in ['vfat', 'msdos']:
+                        return 'fat32'
+                    return fstype
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+        return None
+        
+    def _get_filesystem_max_filesize(self, fstype: Optional[str]) -> int:
+        """Get the maximum file size supported by the filesystem.
+        
+        Args:
+            fstype: Filesystem type string
+            
+        Returns:
+            Maximum file size in bytes
+        """
+        if not fstype:
+            # If we can't detect the filesystem, assume a large modern filesystem
+            return float('inf')
+            
+        # Define maximum file sizes for different filesystems
+        max_sizes = {
+            'fat32': 4 * 1024 * 1024 * 1024 - 1,  # 4GB - 1 byte
+            'vfat': 4 * 1024 * 1024 * 1024 - 1,   # 4GB - 1 byte
+            'msdos': 4 * 1024 * 1024 * 1024 - 1,  # 4GB - 1 byte
+            'ext4': float('inf'),    # Practically unlimited
+            'ext3': float('inf'),    # Practically unlimited
+            'xfs': float('inf'),     # Practically unlimited
+            'ntfs': float('inf'),    # Practically unlimited
+            'apfs': float('inf'),    # Practically unlimited
+            'hfs+': float('inf'),    # Practically unlimited
+            'btrfs': float('inf'),   # Practically unlimited
+            'zfs': float('inf'),     # Practically unlimited
+        }
+        return max_sizes.get(fstype.lower(), float('inf'))
         
     def _calculate_hash(self, file_path: Path, chunk_size: Optional[int] = None) -> str:
         """Calculate SHA256 hash of a file."""
@@ -626,11 +699,33 @@ class ArchivingTool:
                 # Create destination directory
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 
-                # Use macOS-optimized copy if available
-                if self.is_macos:
-                    self._copy_with_macos_optimization(source_path, dest_path)
+                # Check if we need chunked copy for large files
+                file_size = source_path.stat().st_size
+                use_chunked_copy = file_size > (2 * 1024 * 1024 * 1024)  # 2GB threshold
+                
+                # Check filesystem limits
+                max_filesize = self._get_filesystem_max_filesize(self.dest_filesystem)
+                if file_size > max_filesize:
+                    fs_name = self.dest_filesystem or "the destination filesystem"
+                    raise OSError(75, f"File is larger than {self._format_size(max_filesize)} and cannot be copied to {fs_name}: {source_path}")
+                    
+                if use_chunked_copy:
+                    # Use chunked copy for large files (but still under 4GB)
+                    with open(source_path, 'rb') as src, open(dest_path, 'wb') as dst:
+                        while True:
+                            chunk = src.read(8 * 1024 * 1024)  # 8MB chunks
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+                    # Copy metadata separately
+                    shutil.copystat(source_path, dest_path)
                 else:
-                    shutil.copy2(source_path, dest_path)
+                    # Use normal copy for smaller files
+                    if self.is_macos:
+                        # Use macOS-optimized copy if available
+                        self._copy_with_macos_optimization(source_path, dest_path)
+                    else:
+                        shutil.copy2(source_path, dest_path)
                 
                 # Preserve macOS metadata if needed
                 if self.is_macos:
@@ -758,6 +853,60 @@ class ArchivingTool:
         except (OSError, IOError, json.JSONDecodeError) as e:
             print(f"Warning: Could not load progress state: {e}")
             return None
+            
+    def _save_skipped_file(self, rel_path: str, size: int, reason: str) -> None:
+        """Save information about a file that was skipped during copy.
+        
+        Args:
+            rel_path: Relative path of the skipped file
+            size: Size of the file in bytes
+            reason: Reason why the file was skipped
+        """
+        skipped_file = self.destination_dir / ".archiving_tool_skipped.json"
+        try:
+            if skipped_file.exists():
+                with open(skipped_file, 'r') as f:
+                    skipped_data = json.load(f)
+            else:
+                skipped_data = {
+                    'skipped_files': {},
+                    'total_size': 0,
+                    'count': 0
+                }
+            
+            # Add or update skipped file info
+            skipped_data['skipped_files'][rel_path] = {
+                'size': size,
+                'reason': reason,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            # Update totals
+            skipped_data['total_size'] = sum(f['size'] for f in skipped_data['skipped_files'].values())
+            skipped_data['count'] = len(skipped_data['skipped_files'])
+            
+            # Save updated skipped files list
+            with open(skipped_file, 'w') as f:
+                json.dump(skipped_data, f, indent=2)
+                
+        except (OSError, IOError, json.JSONDecodeError) as e:
+            print(f"Warning: Could not save skipped file information: {e}")
+            
+    def get_skipped_files(self) -> Dict:
+        """Get information about files that were skipped during copy.
+        
+        Returns:
+            Dictionary containing information about skipped files and their reasons
+        """
+        skipped_file = self.destination_dir / ".archiving_tool_skipped.json"
+        try:
+            if skipped_file.exists():
+                with open(skipped_file, 'r') as f:
+                    return json.load(f)
+            return {'skipped_files': {}, 'total_size': 0, 'count': 0}
+        except (OSError, IOError, json.JSONDecodeError) as e:
+            print(f"Warning: Could not load skipped files information: {e}")
+            return {'skipped_files': {}, 'total_size': 0, 'count': 0}
             
     def _clear_progress_state(self) -> None:
         """Clear progress state file after successful completion."""
@@ -907,6 +1056,14 @@ class ArchivingTool:
             
             if not source_path.exists():
                 tqdm.write(f"Warning: Source file missing: {source_path}")
+                continue
+                
+            # Check if file size exceeds filesystem limits
+            max_filesize = self._get_filesystem_max_filesize(self.dest_filesystem)
+            if file_info['size'] > max_filesize:
+                fs_name = self.dest_filesystem or "unknown"
+                tqdm.write(f"Warning: Skipping file larger than {self._format_size(max_filesize)} ({fs_name} limit): {rel_path}")
+                self._save_skipped_file(rel_path, file_info['size'], f"File too large for {fs_name} filesystem (limit: {self._format_size(max_filesize)})")
                 continue
                 
             needs_copy = False
@@ -1076,6 +1233,14 @@ class ArchivingTool:
         # Check for new and modified files with progress
         print("Comparing files with manifest...")
         for rel_path, file_info in tqdm(current_files_dict.items(), desc="Checking for changes", unit="files"):
+            # Check if file size exceeds filesystem limits
+            max_filesize = self._get_filesystem_max_filesize(self.dest_filesystem)
+            if file_info['size'] > max_filesize:
+                fs_name = self.dest_filesystem or "unknown"
+                tqdm.write(f"Warning: Skipping file larger than {self._format_size(max_filesize)} ({fs_name} limit): {rel_path}")
+                self._save_skipped_file(rel_path, file_info['size'], f"File too large for {fs_name} filesystem (limit: {self._format_size(max_filesize)})")
+                continue
+                
             if rel_path not in manifest_files:
                 new_files.append(rel_path)
             elif (manifest_files[rel_path]['hash'] != file_info['hash'] or 
