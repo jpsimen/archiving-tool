@@ -178,24 +178,6 @@ class ArchivingTool:
         """Get relative path from source directory."""
         return str(file_path.relative_to(self.source_dir))
         
-    def _is_drive_accessible(self) -> bool:
-        """Check if the destination drive is accessible."""
-        try:
-            # Try to access the destination directory
-            if not self.destination_dir.exists():
-                return False
-            
-            # macOS-specific check for external drive availability
-            if self.is_macos:
-                return self._check_macos_drive_mounted()
-            
-            # Try to create a small test file to check if drive is writable
-            test_file = self.destination_dir / ".archiving_tool_test"
-            test_file.write_text("test")
-            test_file.unlink()
-            return True
-        except (OSError, IOError, PermissionError):
-            return False
             
     def _is_source_accessible(self) -> bool:
         """Check if the source directory is accessible (especially important for network paths)."""
@@ -486,37 +468,7 @@ class ArchivingTool:
             print("Manual reconnection failed")
             self._show_network_troubleshooting_tips()
             return False
-            
-    def _check_macos_drive_mounted(self) -> bool:
-        """Check if external drive is properly mounted on macOS."""
-        try:
-            # Check if the destination path exists first
-            if not self.destination_dir.exists():
-                return False
-
-            # Check if the destination path is on a mounted volume
-            result = subprocess.run(
-                ['diskutil', 'info', str(self.destination_dir)], 
-                capture_output=True, text=True, timeout=5
-            )
-            
-            if result.returncode == 0:
-                output = result.stdout.lower()
-                
-                # Check both mounted status and write protection
-                is_mounted = 'mounted' in output and 'yes' in output
-                is_writable = 'write-protected' not in output or ('write-protected' in output and 'no' in output)
-                
-                if is_mounted and is_writable:
-                    # Verify we can actually write to the destination
-                    test_file = self.destination_dir / ".archiving_tool_test"
-                    test_file.write_text("test")
-                    test_file.unlink()
-                    return True
-            return False
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError, IOError):
-            return False
-            
+   
     def _detect_apfs_filesystem(self) -> bool:
         """Detect if destination is on APFS filesystem (macOS only)."""
         if not self.is_macos:
@@ -548,18 +500,29 @@ class ArchivingTool:
             
         try:
             import subprocess
-            # Copy extended attributes using xattr
+            # List extended attributes using xattr
             result = subprocess.run(
                 ['xattr', '-l', str(source_path)], 
                 capture_output=True, text=True, timeout=5
             )
             
             if result.returncode == 0 and result.stdout.strip():
-                # Copy extended attributes
-                subprocess.run(
-                    ['xattr', '-w', str(source_path), str(dest_path)], 
-                    timeout=10, check=False
-                )
+                # Parse and copy each extended attribute
+                attrs = result.stdout.strip().split('\n')
+                for attr in attrs:
+                    if ':' in attr:  # Skip malformed lines
+                        attr_name = attr.split(':')[0].strip()
+                        # Get the attribute value
+                        get_value = subprocess.run(
+                            ['xattr', '-p', attr_name, str(source_path)],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        if get_value.returncode == 0:
+                            # Copy the attribute to destination
+                            subprocess.run(
+                                ['xattr', '-w', attr_name, get_value.stdout.strip(), str(dest_path)],
+                                timeout=5, check=False
+                            )
             return True
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             # Non-critical - continue without extended attributes
@@ -584,19 +547,12 @@ class ArchivingTool:
             print(f"Waiting {interval}s for drive reconnection...")
             time.sleep(interval)
             total_waited += interval
-            
-            if self._is_drive_accessible():
-                print("Drive reconnected successfully!")
-                return True
                 
         # Final wait with remaining time
         remaining_time = max_wait_time - total_waited
         if remaining_time > 0:
             print(f"Final wait of {remaining_time}s for drive reconnection...")
             time.sleep(remaining_time)
-            if self._is_drive_accessible():
-                print("Drive reconnected successfully!")
-                return True
                 
         print(f"Drive did not reconnect within {max_wait_time}s timeout")
         return False
@@ -766,15 +722,8 @@ class ArchivingTool:
                         if not self._wait_for_network_reconnection():
                             print(f"Network still not accessible, continuing retry... (attempt {attempt + 1}/{self.max_retries + 1})")
                     else:
-                        # Check if destination drive is accessible only after a non-network failure
-                        if not self._is_drive_accessible():
-                            print(f"Destination drive not accessible after copy failure, waiting for reconnection... (attempt {attempt + 1}/{self.max_retries + 1})")
-                            # Wait for drive reconnection
-                            if not self._wait_for_drive_reconnection():
-                                print(f"Drive still not accessible, continuing retry... (attempt {attempt + 1}/{self.max_retries + 1})")
-                        else:
-                            print(f"Copy failed ({e}), retrying in {self.retry_delay}s... (attempt {attempt + 1}/{self.max_retries + 1})")
-                            time.sleep(self.retry_delay)
+                        print(f"Copy failed ({e}), retrying in {self.retry_delay}s... (attempt {attempt + 1}/{self.max_retries + 1})")
+                        time.sleep(self.retry_delay)
                     
                     # Clean up partial file if it exists
                     if dest_path.exists():
@@ -794,16 +743,11 @@ class ArchivingTool:
                     
                     # Check both source and destination accessibility
                     source_accessible = self._is_source_accessible()
-                    dest_accessible = self._is_drive_accessible()
                     
                     if not source_accessible:
                         print("Source accessibility issue detected, waiting for network reconnection...")
                         if not self._wait_for_network_reconnection():
                             print("Source still not accessible, continuing retry...")
-                    elif not dest_accessible:
-                        print("Destination accessibility issue detected, waiting for drive reconnection...")
-                        if not self._wait_for_drive_reconnection():
-                            print("Destination still not accessible, continuing retry...")
                     else:
                         time.sleep(self.retry_delay)
                     
@@ -1122,28 +1066,6 @@ class ArchivingTool:
                     print("Please check that the source directory exists and is accessible")
                 return False
             
-                # Initial drive accessibility check (only once at start)
-            if not self._is_drive_accessible():
-                print("Error: Destination drive is not accessible")
-                print(f"Destination path: {self.destination_dir}")
-                
-                if self.is_macos:
-                    # For macOS, check if drive is properly mounted
-                    if not self._check_macos_drive_mounted():
-                        print("\nDrive appears to be unmounted or improperly mounted.")
-                        print("Troubleshooting tips:")
-                        print("1. Check if the drive appears in Finder")
-                        print("2. Try safely ejecting and reconnecting the drive")
-                        print("3. Verify the drive mounts properly in Disk Utility")
-                        print("4. Check system logs for potential I/O errors (Console.app)")
-                    else:
-                        print("\nDrive is mounted but may have permission issues.")
-                        print("Troubleshooting tips:")
-                        print("1. Check drive permissions in Finder (Get Info)")
-                        print("2. Try running the tool with sudo if needed")
-                        print("3. Verify the drive is not in read-only mode")
-                
-                return False            # Calculate total size for progress tracking
             total_copy_size = sum(file_info['size'] for _, _, file_info in files_to_copy)
             
             # Check for previous progress
