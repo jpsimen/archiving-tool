@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 from colorama import Fore, Style, init
 
-from .core import ArchivingTool
+from archiving_tool.core import ArchivingTool
 
 # Initialize colorama for cross-platform colored output
 init(autoreset=True)

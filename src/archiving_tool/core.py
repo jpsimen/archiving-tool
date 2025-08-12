@@ -490,7 +490,10 @@ class ArchivingTool:
     def _check_macos_drive_mounted(self) -> bool:
         """Check if external drive is properly mounted on macOS."""
         try:
-            import subprocess
+            # Check if the destination path exists first
+            if not self.destination_dir.exists():
+                return False
+
             # Check if the destination path is on a mounted volume
             result = subprocess.run(
                 ['diskutil', 'info', str(self.destination_dir)], 
@@ -498,10 +501,14 @@ class ArchivingTool:
             )
             
             if result.returncode == 0:
-                # Check if volume is mounted and writable
                 output = result.stdout.lower()
-                if 'mounted' in output and 'yes' in output:
-                    # Additional check: try to write a test file
+                
+                # Check both mounted status and write protection
+                is_mounted = 'mounted' in output and 'yes' in output
+                is_writable = 'write-protected' not in output or ('write-protected' in output and 'no' in output)
+                
+                if is_mounted and is_writable:
+                    # Verify we can actually write to the destination
                     test_file = self.destination_dir / ".archiving_tool_test"
                     test_file.write_text("test")
                     test_file.unlink()
@@ -1115,12 +1122,28 @@ class ArchivingTool:
                     print("Please check that the source directory exists and is accessible")
                 return False
             
-            # Initial drive accessibility check (only once at start)
+                # Initial drive accessibility check (only once at start)
             if not self._is_drive_accessible():
                 print("Error: Destination drive is not accessible")
-                return False
-            
-            # Calculate total size for progress tracking
+                print(f"Destination path: {self.destination_dir}")
+                
+                if self.is_macos:
+                    # For macOS, check if drive is properly mounted
+                    if not self._check_macos_drive_mounted():
+                        print("\nDrive appears to be unmounted or improperly mounted.")
+                        print("Troubleshooting tips:")
+                        print("1. Check if the drive appears in Finder")
+                        print("2. Try safely ejecting and reconnecting the drive")
+                        print("3. Verify the drive mounts properly in Disk Utility")
+                        print("4. Check system logs for potential I/O errors (Console.app)")
+                    else:
+                        print("\nDrive is mounted but may have permission issues.")
+                        print("Troubleshooting tips:")
+                        print("1. Check drive permissions in Finder (Get Info)")
+                        print("2. Try running the tool with sudo if needed")
+                        print("3. Verify the drive is not in read-only mode")
+                
+                return False            # Calculate total size for progress tracking
             total_copy_size = sum(file_info['size'] for _, _, file_info in files_to_copy)
             
             # Check for previous progress
