@@ -249,6 +249,40 @@ def resume(destination_dir: str, manifest: str):
 
 
 @cli.command()
+@click.argument('source_dir', type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.option('--dry-run', '-n', is_flag=True, 
+              help='Show what would be merged without making changes')
+def merge_subfolders(source_dir: str, dry_run: bool):
+    """Merge identical subfolders under different parent directories.
+    
+    This command finds and merges cases where the same subfolder exists under different parent
+    directories where one parent name is a prefix of another. For example:
+    'example_fo/subfolder' will be merged into 'example_folder/subfolder'.
+    
+    All contents from the subfolder in the shorter parent directory will be moved to the
+    subfolder in the longer parent directory. In case of filename conflicts, files will
+    be automatically renamed with numeric suffixes.
+    
+    SOURCE_DIR: Directory to scan for mergeable subfolders
+    """
+    if dry_run:
+        print_info("Dry run mode - no changes will be made")
+    else:
+        print_info("Starting subfolder merge operation...")
+    
+    try:
+        tool = ArchivingTool(source_dir, source_dir)  # Use same dir since we don't need manifest
+        if tool.merge_subfolders(dry_run=dry_run):
+            if not dry_run:
+                print_success("Subfolder merge operation completed successfully!")
+        else:
+            print_error("Subfolder merge operation failed")
+            sys.exit(1)
+    except Exception as e:
+        print_error(f"Subfolder merge operation failed: {e}")
+        sys.exit(1)
+
+@cli.command()
 @click.argument('destination_dir', type=click.Path(exists=True, file_okay=False, dir_okay=True))
 @click.option('--manifest', '-m', type=click.Path(), 
               help='Custom path for manifest file (default: <destination>/.archiving_manifest.json)')
@@ -323,6 +357,38 @@ def _show_macos_drive_info(destination_dir: str):
         
     except Exception as e:
         print(f"  Warning: Could not retrieve drive info: {e}")
+
+
+@cli.command()
+@click.argument('source_dir', type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.option('--dry-run', '-n', is_flag=True, 
+              help='Show what would be merged without actually doing it')
+def merge_prefix_folders(source_dir: str, dry_run: bool):
+    """Merge folders where one name is a prefix of another.
+    
+    This command finds and merges folders where one folder name is the exact
+    start of another folder name. For example, 'Artist' and 'Artist - Topic'
+    would be merged, with all contents from 'Artist' being moved to 'Artist - Topic'.
+    
+    SOURCE_DIR: Directory to scan for prefix folders
+    """
+    if dry_run:
+        print_info("Dry run mode - no changes will be made")
+    else:
+        print_info("Starting folder merge operation...")
+    
+    try:
+        # Create a temporary ArchivingTool instance just for merging
+        tool = ArchivingTool(source_dir, source_dir)  # Use same dir since we don't need manifest
+        if tool.merge_prefix_folders(dry_run=dry_run):
+            if not dry_run:
+                print_success("Folder merge operation completed successfully!")
+        else:
+            print_error("Folder merge operation failed")
+            sys.exit(1)
+    except Exception as e:
+        print_error(f"Folder merge operation failed: {e}")
+        sys.exit(1)
 
 
 if __name__ == '__main__':

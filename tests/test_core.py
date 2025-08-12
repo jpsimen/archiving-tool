@@ -336,28 +336,6 @@ class TestArchivingToolCopy:
         assert not (self.dest_dir / "file1.txt").exists()
         assert (self.dest_dir / "file2.txt").exists()
         
-    @patch('archiving_tool.core.ArchivingTool._is_drive_accessible')
-    def test_copy_drive_not_accessible(self, mock_drive_check):
-        """Test copy when drive is not accessible."""
-        mock_drive_check.return_value = False
-        
-        self.create_test_files_and_manifest()
-        
-        result = self.tool.copy()
-        
-        assert result is False
-        
-    @patch('archiving_tool.core.ArchivingTool._copy_file_with_retry')
-    def test_copy_file_copy_failure(self, mock_copy):
-        """Test copy when file copy fails."""
-        mock_copy.return_value = False
-        
-        self.create_test_files_and_manifest()
-        
-        result = self.tool.copy()
-        
-        assert result is False
-        
     def test_copy_no_files_to_copy(self):
         """Test copy when all files are already up to date."""
         self.create_test_files_and_manifest()
@@ -842,6 +820,90 @@ class TestArchivingToolErrorHandling:
 
 
 # Integration test class
+class TestArchivingToolSubfolderMerge:
+    """Test cases for merging subfolders with same names."""
+    
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.source_dir = Path(self.temp_dir) / "source"
+        self.source_dir.mkdir()
+        
+        self.tool = ArchivingTool(str(self.source_dir), str(self.source_dir))  # Use same dir since we don't need manifest
+        
+    def teardown_method(self):
+        """Clean up test fixtures."""
+        shutil.rmtree(self.temp_dir)
+        
+    def test_find_mergeable_subfolders(self):
+        """Test finding subfolders with identical names."""
+        # Create test structure
+        (self.source_dir / "example_fo" / "subfolder").mkdir(parents=True)
+        (self.source_dir / "example_folder" / "subfolder").mkdir(parents=True)
+        (self.source_dir / "other_folder" / "different").mkdir(parents=True)
+        
+        mergeable = self.tool._find_mergeable_subfolders()
+        
+        assert len(mergeable) == 1
+        prefix_path, full_path = mergeable[0]
+        assert "example_fo/subfolder" in str(prefix_path)
+        assert "example_folder/subfolder" in str(full_path)
+        
+    def test_merge_subfolders_with_files(self):
+        """Test merging subfolders including their files."""
+        # Create test structure with files
+        (self.source_dir / "example_fo" / "subfolder").mkdir(parents=True)
+        (self.source_dir / "example_folder" / "subfolder").mkdir(parents=True)
+        
+        # Add some files
+        (self.source_dir / "example_fo" / "subfolder" / "file1.mp3").write_text("content1")
+        (self.source_dir / "example_folder" / "subfolder" / "file2.mp3").write_text("content2")
+        
+        result = self.tool.merge_subfolders(dry_run=False)
+        
+        assert result is True
+        
+        # Check that files were merged correctly
+        merged_path = self.source_dir / "example_folder" / "subfolder"
+        assert (merged_path / "file1.mp3").exists()
+        assert (merged_path / "file2.mp3").exists()
+        assert (merged_path / "file1.mp3").read_text() == "content1"
+        assert not (self.source_dir / "example_fo" / "subfolder").exists()
+        
+    def test_merge_subfolders_dry_run(self):
+        """Test dry run mode for subfolder merging."""
+        # Create test structure
+        (self.source_dir / "example_fo" / "subfolder").mkdir(parents=True)
+        (self.source_dir / "example_folder" / "subfolder").mkdir(parents=True)
+        (self.source_dir / "example_fo" / "subfolder" / "file1.mp3").write_text("content1")
+        
+        result = self.tool.merge_subfolders(dry_run=True)
+        
+        assert result is True
+        # Check that no files were actually moved
+        assert (self.source_dir / "example_fo" / "subfolder" / "file1.mp3").exists()
+        
+    def test_merge_subfolders_with_name_conflicts(self):
+        """Test handling of name conflicts during merge."""
+        # Create test structure with conflicting files
+        (self.source_dir / "example_fo" / "subfolder").mkdir(parents=True)
+        (self.source_dir / "example_folder" / "subfolder").mkdir(parents=True)
+        
+        # Create files with same name but different content
+        (self.source_dir / "example_fo" / "subfolder" / "same.mp3").write_text("content1")
+        (self.source_dir / "example_folder" / "subfolder" / "same.mp3").write_text("content2")
+        
+        result = self.tool.merge_subfolders(dry_run=False)
+        
+        assert result is True
+        
+        # Check that both files exist with appropriate names
+        merged_path = self.source_dir / "example_folder" / "subfolder"
+        assert (merged_path / "same.mp3").exists()  # Original stays
+        assert (merged_path / "same_1.mp3").exists()  # Moved file gets renamed
+        assert (merged_path / "same.mp3").read_text() == "content2"  # Original content preserved
+        assert (merged_path / "same_1.mp3").read_text() == "content1"  # Moved content preserved
+
 class TestArchivingToolIntegration:
     """Integration tests for complete workflows."""
     

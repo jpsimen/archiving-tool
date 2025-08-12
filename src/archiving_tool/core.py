@@ -50,7 +50,7 @@ class ArchivingTool:
             
         self.exclusion_patterns = {
             '.DS_Store', 'Thumbs.db', '.tmp', '.temp', '~$*', '*.tmp', '*.temp',
-            '.git', '.svn', '.hg', '__pycache__', '*.pyc', '*.pyo'
+            '.git', '.svn', '.hg', '__pycache__', '*.pyc', '*.pyo',
         }
         
         # macOS-specific exclusions
@@ -177,7 +177,110 @@ class ArchivingTool:
     def _get_relative_path(self, file_path: Path) -> str:
         """Get relative path from source directory."""
         return str(file_path.relative_to(self.source_dir))
+
+    def _find_prefix_folders(self) -> List[Tuple[str, str]]:
+        """Find folder pairs where one folder name is a prefix of the other.
         
+        Returns:
+            List of tuples (prefix_path, full_path) where prefix_path is the
+            shorter folder name that is a prefix of the longer full_path.
+        """
+        # Get all subdirectories
+        subdirs = set()
+        for root, dirs, _ in os.walk(self.source_dir):
+            for dir_name in dirs:
+                full_path = Path(root) / dir_name
+                rel_path = str(full_path.relative_to(self.source_dir))
+                subdirs.add(rel_path)
+        
+        # Find prefix pairs
+        prefix_pairs = []
+        subdirs_list = sorted(subdirs)  # Sort to group similar names together
+        
+        for i, dir1 in enumerate(subdirs_list):
+            dir1_name = Path(dir1).name
+            dir1_parent = str(Path(dir1).parent)
+            
+            # Compare with all subsequent directories in the same parent folder
+            for dir2 in subdirs_list[i + 1:]:
+                dir2_name = Path(dir2).name
+                dir2_parent = str(Path(dir2).parent)
+                
+                # Only compare directories in the same parent folder
+                if dir1_parent != dir2_parent:
+                    continue
+                    
+                # Check if dir1 is a prefix of dir2 (ignoring case for better matching)
+                if dir1_name.lower() != dir2_name.lower() and dir2_name.lower().startswith(dir1_name.lower()):
+                    prefix_pairs.append((dir1, dir2))
+        
+        return prefix_pairs
+        
+    def merge_prefix_folders(self, dry_run: bool = False) -> bool:
+        """Merge folders where one folder name is a prefix of another.
+        
+        This function finds and merges folders where one folder name is the exact
+        start of another folder name. For example, 'Artist' and 'Artist - Topic'
+        would be merged, with all contents from 'Artist' being moved to 'Artist - Topic'.
+        
+        Args:
+            dry_run: If True, only show what would be merged without making changes
+            
+        Returns:
+            True if successful or no merges needed, False if error occurred
+        """
+        prefix_pairs = self._find_prefix_folders()
+        
+        if not prefix_pairs:
+            print("No prefix folders found that need merging")
+            return True
+            
+        print(f"\nFound {len(prefix_pairs)} folder pairs to merge:")
+        for prefix_path, full_path in prefix_pairs:
+            print(f"  {prefix_path} -> {full_path}")
+            
+        if dry_run:
+            return True
+            
+        # Perform merges
+        for prefix_path, full_path in tqdm(prefix_pairs, desc="Merging folders", unit="pairs"):
+            source_dir = self.source_dir / prefix_path
+            dest_dir = self.source_dir / full_path
+            try:
+                for root, _, files in os.walk(source_dir):
+                    if files == []:
+                        continue
+                    root = Path(root)
+                    dest_subfolder = dest_dir / root.name 
+                    dest_subfolder.mkdir(parents=True, exist_ok=True)
+                    for item in files:
+                        source_item = root / item
+                        dest_item = dest_subfolder / item
+                        if dest_item.exists():
+                            source_item.unlink()  # Remove source if it already exists in destination
+                            tqdm.write(f"Skipping {source_item} - already exists in {dest_item}")
+                            continue
+                        if self._should_exclude(source_item):
+                            tqdm.write(f"Excluding {source_item} based on exclusion patterns")
+                            continue
+                            
+                        # Move file to destination
+                        shutil.move(str(source_item), str(dest_item))
+                        tqdm.write(f"Moved {source_item} to {dest_item}")
+                    root.rmdir()  # Remove the now-empty root directory   
+                # Remove the now-empty source directory
+                try:
+                    source_dir.rmdir()
+                except OSError:
+                    # Directory might not be empty if some moves failed
+                    tqdm.write(f"Warning: Could not remove {source_dir} - it may not be empty")
+                    
+            except OSError as e:
+                tqdm.write(f"Error processing {source_dir}: {e}")
+                return False
+                
+        print("\nFolder merges completed successfully!")
+        return True
             
     def _is_source_accessible(self) -> bool:
         """Check if the source directory is accessible (especially important for network paths)."""
@@ -1438,6 +1541,124 @@ class ArchivingTool:
                 return f"{size_bytes:.1f} {unit}"
             size_bytes /= 1024.0
         return f"{size_bytes:.1f} PB"
+    
+    def _find_mergeable_subfolders(self) -> List[Tuple[Path, Path]]:
+        """Find pairs of subfolders that have identical names and can be merged.
+        
+        This method searches for cases where the same subfolder name appears under
+        different parent folders, such as 'example_fo/subfolder' and 'example_folder/subfolder'.
+        
+        Returns:
+            List of tuples (prefix_path, full_path) where prefix_path is in a folder
+            that is a prefix of another folder, and both contain the same subfolder name.
+        """
+        # Build a map of subfolder names to their full paths
+        subfolder_map = {}  # Dict[str, List[Path]]
+        
+        for root, dirs, _ in os.walk(self.source_dir):
+            root_path = Path(root)
+            for dir_name in dirs:
+                # Get the full path to this directory
+                full_path = root_path / dir_name
+                # Only store paths that are at least 2 levels deep from source
+                if len(full_path.relative_to(self.source_dir).parts) >= 2:
+                    # Use the last part (actual folder name) as key
+                    key = dir_name
+                    if key not in subfolder_map:
+                        subfolder_map[key] = []
+                    subfolder_map[key].append(full_path)
+        
+        # Find pairs where parent folders have prefix relationship
+        mergeable_pairs = []
+        for subfolder_name, paths in subfolder_map.items():
+            if len(paths) < 2:
+                continue
+                
+            # Compare each pair of paths with the same subfolder name
+            for i, path1 in enumerate(paths):
+                path1_parent = path1.parent
+                for path2 in paths[i + 1:]:
+                    path2_parent = path2.parent
+                    
+                    # Check if one parent folder name is a prefix of the other
+                    if path1_parent.name.startswith(path2_parent.name) or path2_parent.name.startswith(path1_parent.name):
+                        # Add the one in the prefix folder first
+                        if path1_parent.name.startswith(path2_parent.name):
+                            mergeable_pairs.append((path2, path1))
+                        else:
+                            mergeable_pairs.append((path1, path2))
+        
+        return mergeable_pairs
+    
+    def merge_subfolders(self, dry_run: bool = False) -> bool:
+        """Merge subfolders that have identical names under prefix parent folders.
+        
+        This method identifies and merges cases where the same subfolder exists in
+        different parent directories where one parent name is a prefix of another.
+        For example: 'example_fo/subfolder' will be merged into 'example_folder/subfolder'.
+        
+        Args:
+            dry_run: If True, only show what would be merged without making changes
+            
+        Returns:
+            True if successful or no merges needed, False if errors occurred
+        """
+        mergeable_pairs = self._find_mergeable_subfolders()
+        
+        if not mergeable_pairs:
+            print("No mergeable subfolders found")
+            return True
+            
+        print(f"\nFound {len(mergeable_pairs)} subfolder pairs to merge:")
+        for source_path, dest_path in mergeable_pairs:
+            print(f"  {source_path.relative_to(self.source_dir)} -> {dest_path.relative_to(self.source_dir)}")
+            
+        if dry_run:
+            return True
+            
+        # Perform merges
+        for source_path, dest_path in tqdm(mergeable_pairs, desc="Merging subfolders", unit="pairs"):
+            try:
+                # List all items in source directory
+                for item in source_path.iterdir():
+                    dest_item = dest_path / item.name
+                    
+                    # If destination item exists and is different, rename source with suffix
+                    if dest_item.exists():
+                        # For files, add numeric suffix until we find a free name
+                        if item.is_file():
+                            counter = 1
+                            base = item.stem
+                            suffix = item.suffix
+                            while dest_item.exists():
+                                new_name = f"{base}_{counter}{suffix}"
+                                dest_item = dest_path / new_name
+                                counter += 1
+                    
+                    # Move the item
+                    try:
+                        shutil.move(str(item), str(dest_item))
+                    except OSError as e:
+                        tqdm.write(f"Error moving {item} to {dest_item}: {e}")
+                        continue
+                        
+                # Remove the now-empty source directory
+                try:
+                    source_path.rmdir()
+                    # Try to remove parent if it's empty (this covers the example_fo case)
+                    parent = source_path.parent
+                    if not any(parent.iterdir()):
+                        parent.rmdir()
+                except OSError as e:
+                    # Directory might not be empty if some moves failed
+                    tqdm.write(f"Warning: Could not remove {source_path}: {e}")
+                    
+            except OSError as e:
+                tqdm.write(f"Error processing {source_path}: {e}")
+                return False
+                
+        print("\nSubfolder merges completed successfully!")
+        return True
         
     def _create_progress_bar(self, iterable, desc: str, unit: str = "items", 
                            total_size: Optional[int] = None) -> tqdm:

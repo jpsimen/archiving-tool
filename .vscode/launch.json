@@ -12,6 +12,14 @@
             "program": "${workspaceFolder}/src/archiving_tool/cli.py",
             "console": "integratedTerminal",
             "args": "copy /Volumes/hot/Test",
+        },
+                {
+            "name": "Merge prefix folders",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/archiving_tool/cli.py",
+            "console": "integratedTerminal",
+            "args": "merge-prefix-folders /home/jp/Desktop/duplicate",
         }
     ]
 }
