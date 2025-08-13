@@ -189,6 +189,8 @@ class ArchivingTool:
         subdirs = set()
         for root, dirs, _ in os.walk(self.source_dir):
             for dir_name in dirs:
+                if len(dir_name) < 10:
+                    continue
                 full_path = Path(root) / dir_name
                 rel_path = str(full_path.relative_to(self.source_dir))
                 subdirs.add(rel_path)
@@ -251,8 +253,11 @@ class ArchivingTool:
                     if files == []:
                         continue
                     root = Path(root)
-                    dest_subfolder = dest_dir / root.name 
-                    dest_subfolder.mkdir(parents=True, exist_ok=True)
+                    if root == source_dir:
+                        dest_subfolder = dest_dir
+                    else:
+                        dest_subfolder = dest_dir / root.name 
+                        dest_subfolder.mkdir(parents=True, exist_ok=True)
                     for item in files:
                         source_item = root / item
                         dest_item = dest_subfolder / item
