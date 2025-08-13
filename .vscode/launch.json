@@ -20,6 +20,14 @@
             "program": "${workspaceFolder}/src/archiving_tool/cli.py",
             "console": "integratedTerminal",
             "args": "merge-prefix-folders /home/jp/Desktop/duplicate",
+        },
+                {
+            "name": "Resume",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/archiving_tool/cli.py",
+            "console": "integratedTerminal",
+            "args": "resume /Volumes/hot/iTunes/Music",
         }
     ]
 }
